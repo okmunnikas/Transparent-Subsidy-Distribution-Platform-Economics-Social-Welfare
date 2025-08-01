@@ -773,3 +773,366 @@
 (define-read-only (is-emergency-operator (operator principal))
     (default-to false (map-get? emergency-operators operator))
 )
+
+(define-constant err-verification-failed (err u600))
+(define-constant err-verification-not-found (err u601))
+(define-constant err-insufficient-verification-score (err u602))
+(define-constant err-verification-expired (err u603))
+(define-constant err-kyc-required (err u604))
+
+(define-data-var minimum-verification-score uint u70)
+(define-data-var verification-expiry-period uint u2016)
+(define-data-var verification-counter uint u0)
+
+(define-map verification-records
+    principal
+    {
+        kyc-status: bool,
+        identity-verified: bool,
+        income-verified: bool,
+        address-verified: bool,
+        verification-score: uint,
+        last-verification: uint,
+        verification-expiry: uint,
+        fraud-flags: uint,
+        reputation-score: uint,
+        verification-level: uint,
+    }
+)
+
+(define-map verification-criteria
+    (string-ascii 20)
+    {
+        weight: uint,
+        required: bool,
+        max-score: uint,
+        active: bool,
+    }
+)
+
+(define-map verification-history
+    principal
+    (list 20 uint)
+)
+
+(define-map verification-sessions
+    uint
+    {
+        beneficiary: principal,
+        verifier: principal,
+        timestamp: uint,
+        criteria-checked: (list 10 (string-ascii 20)),
+        score-awarded: uint,
+        session-type: (string-ascii 15),
+        notes: (string-ascii 100),
+    }
+)
+
+(define-public (initialize-verification-criteria)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verification-criteria "kyc" {
+            weight: u30,
+            required: true,
+            max-score: u30,
+            active: true,
+        })
+        (map-set verification-criteria "identity" {
+            weight: u25,
+            required: true,
+            max-score: u25,
+            active: true,
+        })
+        (map-set verification-criteria "income" {
+            weight: u20,
+            required: false,
+            max-score: u20,
+            active: true,
+        })
+        (map-set verification-criteria "address" {
+            weight: u15,
+            required: false,
+            max-score: u15,
+            active: true,
+        })
+        (map-set verification-criteria "reputation" {
+            weight: u10,
+            required: false,
+            max-score: u10,
+            active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-verification-criteria
+        (criteria-name (string-ascii 20))
+        (weight uint)
+        (required bool)
+        (max-score uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verification-criteria criteria-name {
+            weight: weight,
+            required: required,
+            max-score: max-score,
+            active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (verify-beneficiary-identity
+        (beneficiary principal)
+        (kyc-status bool)
+        (identity-verified bool)
+        (income-verified bool)
+        (address-verified bool)
+    )
+    (let (
+            (session-id (+ (var-get verification-counter) u1))
+            (calculated-score (calculate-verification-score kyc-status identity-verified
+                income-verified address-verified u0
+            ))
+            (current-history (default-to (list) (map-get? verification-history beneficiary)))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verification-records beneficiary {
+            kyc-status: kyc-status,
+            identity-verified: identity-verified,
+            income-verified: income-verified,
+            address-verified: address-verified,
+            verification-score: calculated-score,
+            last-verification: stacks-block-height,
+            verification-expiry: (+ stacks-block-height (var-get verification-expiry-period)),
+            fraud-flags: u0,
+            reputation-score: u50,
+            verification-level: (if (>= calculated-score u90)
+                u3
+                (if (>= calculated-score u70)
+                    u2
+                    u1
+                )
+            ),
+        })
+        (map-set verification-sessions session-id {
+            beneficiary: beneficiary,
+            verifier: tx-sender,
+            timestamp: stacks-block-height,
+            criteria-checked: (list "kyc" "identity" "income" "address" "" "" "" "" "" ""),
+            score-awarded: calculated-score,
+            session-type: "full-verify",
+            notes: "Complete verification session performed successfully with all required criteria checked",
+        })
+        (map-set verification-history beneficiary
+            (unwrap! (as-max-len? (append current-history session-id) u20)
+                err-verification-failed
+            ))
+        (var-set verification-counter session-id)
+        (ok calculated-score)
+    )
+)
+
+(define-private (calculate-verification-score
+        (kyc-status bool)
+        (identity-verified bool)
+        (income-verified bool)
+        (address-verified bool)
+        (reputation-bonus uint)
+    )
+    (let (
+            (kyc-score (if kyc-status
+                u30
+                u0
+            ))
+            (identity-score (if identity-verified
+                u25
+                u0
+            ))
+            (income-score (if income-verified
+                u20
+                u0
+            ))
+            (address-score (if address-verified
+                u15
+                u0
+            ))
+            (base-score (+ kyc-score (+ identity-score (+ income-score address-score))))
+        )
+        (+ base-score reputation-bonus)
+    )
+)
+
+(define-public (update-reputation-score
+        (beneficiary principal)
+        (adjustment int)
+        (reason (string-ascii 50))
+    )
+    (let (
+            (verification-data (unwrap! (map-get? verification-records beneficiary)
+                err-verification-not-found
+            ))
+            (current-reputation (get reputation-score verification-data))
+            (new-reputation (if (< adjustment 0)
+                (if (>= current-reputation (to-uint (- 0 adjustment)))
+                    (- current-reputation (to-uint (- 0 adjustment)))
+                    u0
+                )
+                (+ current-reputation (to-uint adjustment))
+            ))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verification-records beneficiary
+            (merge verification-data {
+                reputation-score: new-reputation,
+                verification-score: (+ (get verification-score verification-data)
+                    (if (> new-reputation current-reputation)
+                        (- new-reputation current-reputation)
+                        u0
+                    )),
+            })
+        )
+        (ok new-reputation)
+    )
+)
+
+(define-public (flag-suspicious-beneficiary
+        (beneficiary principal)
+        (flag-type (string-ascii 30))
+    )
+    (let ((verification-data (unwrap! (map-get? verification-records beneficiary)
+            err-verification-not-found
+        )))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verification-records beneficiary
+            (merge verification-data {
+                fraud-flags: (+ (get fraud-flags verification-data) u1),
+                reputation-score: (if (>= (get reputation-score verification-data) u10)
+                    (- (get reputation-score verification-data) u10)
+                    u0
+                ),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (verify-eligibility-for-distribution (beneficiary principal))
+    (let (
+            (verification-data (unwrap! (map-get? verification-records beneficiary)
+                err-verification-not-found
+            ))
+            (beneficiary-data (unwrap! (map-get? beneficiaries beneficiary) err-not-registered))
+        )
+        (asserts! (get kyc-status verification-data) err-kyc-required)
+        (asserts!
+            (>= (get verification-score verification-data)
+                (var-get minimum-verification-score)
+            )
+            err-insufficient-verification-score
+        )
+        (asserts!
+            (< stacks-block-height (get verification-expiry verification-data))
+            err-verification-expired
+        )
+        (asserts! (< (get fraud-flags verification-data) u3)
+            err-verification-failed
+        )
+        (asserts! (get eligible beneficiary-data) err-not-eligible)
+        (ok true)
+    )
+)
+
+(define-public (batch-verify-eligibility (beneficiaries-list (list 10 principal)))
+    (let ((results (map verify-eligibility-for-distribution beneficiaries-list)))
+        (ok results)
+    )
+)
+
+(define-public (renew-verification (beneficiary principal))
+    (let ((verification-data (unwrap! (map-get? verification-records beneficiary)
+            err-verification-not-found
+        )))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verification-records beneficiary
+            (merge verification-data {
+                last-verification: stacks-block-height,
+                verification-expiry: (+ stacks-block-height (var-get verification-expiry-period)),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (set-verification-parameters
+        (minimum-score uint)
+        (expiry-period uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set minimum-verification-score minimum-score)
+        (var-set verification-expiry-period expiry-period)
+        (ok true)
+    )
+)
+
+(define-public (enhanced-distribute-subsidy (beneficiary principal))
+    (begin
+        (try! (verify-eligibility-for-distribution beneficiary))
+        (try! (pre-distribution-checks beneficiary
+            (get amount
+                (unwrap!
+                    (map-get? subsidy-types
+                        (get subsidy-type
+                            (unwrap! (map-get? beneficiaries beneficiary)
+                                err-not-registered
+                            ))
+                    )
+                    err-not-eligible
+                ))
+        ))
+        (distribute-subsidy beneficiary)
+    )
+)
+
+(define-read-only (get-verification-record (beneficiary principal))
+    (map-get? verification-records beneficiary)
+)
+
+(define-read-only (get-verification-criteria (criteria-name (string-ascii 20)))
+    (map-get? verification-criteria criteria-name)
+)
+
+(define-read-only (get-verification-session (session-id uint))
+    (map-get? verification-sessions session-id)
+)
+
+(define-read-only (get-verification-history (beneficiary principal))
+    (map-get? verification-history beneficiary)
+)
+
+(define-read-only (check-verification-status (beneficiary principal))
+    (match (map-get? verification-records beneficiary)
+        verification-data (ok {
+            is-verified: (>= (get verification-score verification-data)
+                (var-get minimum-verification-score)
+            ),
+            score: (get verification-score verification-data),
+            expires-at: (get verification-expiry verification-data),
+            is-expired: (>= stacks-block-height (get verification-expiry verification-data)),
+            fraud-flags: (get fraud-flags verification-data),
+            reputation: (get reputation-score verification-data),
+        })
+        (err err-verification-not-found)
+    )
+)
+
+(define-read-only (get-verification-stats)
+    (ok {
+        total-sessions: (var-get verification-counter),
+        minimum-required-score: (var-get minimum-verification-score),
+        expiry-period: (var-get verification-expiry-period),
+        current-block: stacks-block-height,
+    })
+)
