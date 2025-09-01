@@ -780,9 +780,41 @@
 (define-constant err-verification-expired (err u603))
 (define-constant err-kyc-required (err u604))
 
+(define-constant err-invalid-indicator (err u700))
+(define-constant err-adjustment-factor-out-of-range (err u701))
+(define-constant err-indicator-not-found (err u702))
+
 (define-data-var minimum-verification-score uint u70)
 (define-data-var verification-expiry-period uint u2016)
 (define-data-var verification-counter uint u0)
+
+(define-data-var economic-adjustment-enabled bool false)
+(define-data-var base-adjustment-factor uint u100)
+(define-data-var indicator-counter uint u0)
+
+(define-map economic-indicators
+    (string-ascii 20)
+    {
+        value: uint,
+        baseline: uint,
+        weight: uint,
+        last-updated: uint,
+        update-frequency: uint,
+        active: bool,
+    }
+)
+
+(define-map adjustment-history
+    uint
+    {
+        indicator: (string-ascii 20),
+        old-value: uint,
+        new-value: uint,
+        adjustment-factor: uint,
+        timestamp: uint,
+        updater: principal,
+    }
+)
 
 (define-map verification-records
     principal
@@ -1134,5 +1166,182 @@
         minimum-required-score: (var-get minimum-verification-score),
         expiry-period: (var-get verification-expiry-period),
         current-block: stacks-block-height,
+    })
+)
+
+(define-public (initialize-economic-indicators)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set economic-indicators "inflation" {
+            value: u100,
+            baseline: u100,
+            weight: u50,
+            last-updated: stacks-block-height,
+            update-frequency: u2016,
+            active: true,
+        })
+        (map-set economic-indicators "cost-of-living" {
+            value: u100,
+            baseline: u100,
+            weight: u30,
+            last-updated: stacks-block-height,
+            update-frequency: u2016,
+            active: true,
+        })
+        (map-set economic-indicators "poverty-line" {
+            value: u100,
+            baseline: u100,
+            weight: u20,
+            last-updated: stacks-block-height,
+            update-frequency: u4032,
+            active: true,
+        })
+        (var-set economic-adjustment-enabled true)
+        (ok true)
+    )
+)
+
+(define-public (update-economic-indicator
+        (indicator-name (string-ascii 20))
+        (new-value uint)
+    )
+    (let (
+            (indicator (unwrap! (map-get? economic-indicators indicator-name)
+                err-indicator-not-found
+            ))
+            (adjustment-id (+ (var-get indicator-counter) u1))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> new-value u0) err-invalid-indicator)
+        (asserts! (< new-value u500) err-invalid-indicator)
+        (asserts!
+            (>= (- stacks-block-height (get last-updated indicator))
+                (get update-frequency indicator)
+            )
+            err-invalid-indicator
+        )
+        (map-set adjustment-history adjustment-id {
+            indicator: indicator-name,
+            old-value: (get value indicator),
+            new-value: new-value,
+            adjustment-factor: (var-get base-adjustment-factor),
+            timestamp: stacks-block-height,
+            updater: tx-sender,
+        })
+        (map-set economic-indicators indicator-name
+            (merge indicator {
+                value: new-value,
+                last-updated: stacks-block-height,
+            })
+        )
+        (var-set indicator-counter adjustment-id)
+        (ok new-value)
+    )
+)
+
+(define-public (toggle-economic-adjustments)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set economic-adjustment-enabled
+            (not (var-get economic-adjustment-enabled))
+        )
+        (ok (var-get economic-adjustment-enabled))
+    )
+)
+
+(define-private (calculate-adjustment-factor)
+    (if (var-get economic-adjustment-enabled)
+        (let (
+                (inflation-data (unwrap! (map-get? economic-indicators "inflation") (ok u100)))
+                (col-data (unwrap! (map-get? economic-indicators "cost-of-living")
+                    (ok u100)
+                ))
+                (poverty-data (unwrap! (map-get? economic-indicators "poverty-line") (ok u100)))
+                (inflation-factor (* (/ (get value inflation-data) (get baseline inflation-data))
+                    (get weight inflation-data)
+                ))
+                (col-factor (* (/ (get value col-data) (get baseline col-data))
+                    (get weight col-data)
+                ))
+                (poverty-factor (* (/ (get value poverty-data) (get baseline poverty-data))
+                    (get weight poverty-data)
+                ))
+                (total-factor (+ inflation-factor (+ col-factor poverty-factor)))
+                (normalized-factor (/ total-factor u100))
+            )
+            (ok (if (> normalized-factor u50)
+                normalized-factor
+                u50
+            ))
+        )
+        (ok u100)
+    )
+)
+
+(define-private (apply-economic-adjustment (base-amount uint))
+    (let ((adjustment-factor (unwrap-panic (calculate-adjustment-factor))))
+        (* base-amount (/ adjustment-factor u100))
+    )
+)
+
+(define-public (get-adjusted-subsidy-amount (subsidy-type (string-ascii 20)))
+    (let ((subsidy-data (unwrap! (map-get? subsidy-types subsidy-type) err-not-eligible)))
+        (ok (apply-economic-adjustment (get amount subsidy-data)))
+    )
+)
+
+(define-public (enhanced-distribute-subsidy-with-adjustments (beneficiary principal))
+    (let (
+            (beneficiary-data (unwrap! (map-get? beneficiaries beneficiary) err-not-registered))
+            (subsidy-type-data (unwrap! (map-get? subsidy-types (get subsidy-type beneficiary-data))
+                err-not-eligible
+            ))
+            (adjusted-amount (apply-economic-adjustment (get amount subsidy-type-data)))
+            (current-time stacks-block-height)
+        )
+        (try! (verify-eligibility-for-distribution beneficiary))
+        (try! (pre-distribution-checks beneficiary adjusted-amount))
+        (asserts! (get eligible beneficiary-data) err-not-eligible)
+        (asserts! (get active subsidy-type-data) err-not-eligible)
+        (asserts!
+            (>= (- current-time (get last-distribution beneficiary-data))
+                (get period subsidy-type-data)
+            )
+            err-not-eligible
+        )
+        (asserts! (>= (var-get treasury-balance) adjusted-amount)
+            err-insufficient-balance
+        )
+        (map-set beneficiaries beneficiary
+            (merge beneficiary-data {
+                received-amount: (+ (get received-amount beneficiary-data) adjusted-amount),
+                last-distribution: current-time,
+            })
+        )
+        (var-set treasury-balance (- (var-get treasury-balance) adjusted-amount))
+        (var-set total-distributed
+            (+ (var-get total-distributed) adjusted-amount)
+        )
+        (ok adjusted-amount)
+    )
+)
+
+(define-read-only (get-economic-indicator (indicator-name (string-ascii 20)))
+    (map-get? economic-indicators indicator-name)
+)
+
+(define-read-only (get-adjustment-history (adjustment-id uint))
+    (map-get? adjustment-history adjustment-id)
+)
+
+(define-read-only (get-current-adjustment-factor)
+    (calculate-adjustment-factor)
+)
+
+(define-read-only (get-economic-status)
+    (ok {
+        adjustments-enabled: (var-get economic-adjustment-enabled),
+        base-factor: (var-get base-adjustment-factor),
+        total-adjustments: (var-get indicator-counter),
     })
 )
