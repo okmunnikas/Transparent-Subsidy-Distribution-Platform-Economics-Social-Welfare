@@ -1169,6 +1169,416 @@
     })
 )
 
+;; Subsidy Impact Scoring System
+(define-constant err-invalid-score (err u800))
+(define-constant err-score-not-found (err u801))
+(define-constant err-invalid-metric (err u802))
+(define-constant err-impact-assessment-not-found (err u803))
+(define-constant err-insufficient-data (err u804))
+
+(define-data-var impact-assessment-counter uint u0)
+(define-data-var total-impact-score uint u0)
+(define-data-var assessments-completed uint u0)
+
+(define-map impact-assessments
+    uint
+    {
+        beneficiary: principal,
+        assessment-type: (string-ascii 30),
+        baseline-score: uint,
+        current-score: uint,
+        improvement-score: uint,
+        assessment-period: uint,
+        metrics-tracked: (list 5 (string-ascii 25)),
+        assessor: principal,
+        timestamp: uint,
+        notes: (string-ascii 200),
+        verified: bool,
+    }
+)
+
+(define-map beneficiary-impact-profile
+    principal
+    {
+        total-assessments: uint,
+        average-impact-score: uint,
+        highest-impact-score: uint,
+        improvement-trend: int,
+        last-assessment: uint,
+        impact-categories: (list 10 (string-ascii 25)),
+        cumulative-improvement: uint,
+        risk-factors: uint,
+    }
+)
+
+(define-map impact-metrics
+    (string-ascii 25)
+    {
+        metric-name: (string-ascii 50),
+        weight: uint,
+        max-score: uint,
+        measurement-unit: (string-ascii 20),
+        active: bool,
+        description: (string-ascii 100),
+    }
+)
+
+(define-map assessment-categories
+    (string-ascii 30)
+    {
+        category-name: (string-ascii 50),
+        target-population: (string-ascii 30),
+        assessment-frequency: uint,
+        metrics-included: (list 5 (string-ascii 25)),
+        active: bool,
+    }
+)
+
+(define-map monthly-impact-summary
+    {
+        year: uint,
+        month: uint,
+    }
+    {
+        total-assessments: uint,
+        average-improvement: uint,
+        beneficiaries-assessed: uint,
+        high-impact-count: uint,
+        total-impact-value: uint,
+    }
+)
+
+(define-public (initialize-impact-metrics)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        ;; Health and Nutrition
+        (map-set impact-metrics "health-improvement" {
+            metric-name: "Health and Wellness Score Improvement",
+            weight: u25,
+            max-score: u100,
+            measurement-unit: "percentage",
+            active: true,
+            description: "Measures improvement in overall health status and access to healthcare services",
+        })
+        ;; Education Access
+        (map-set impact-metrics "education-access" {
+            metric-name: "Educational Participation Enhancement",
+            weight: u20,
+            max-score: u100,
+            measurement-unit: "percentage",
+            active: true,
+            description: "Tracks increased school enrollment and educational resource accessibility",
+        })
+        ;; Economic Mobility
+        (map-set impact-metrics "economic-mobility" {
+            metric-name: "Income Stability and Growth",
+            weight: u25,
+            max-score: u100,
+            measurement-unit: "percentage",
+            active: true,
+            description: "Measures income stabilization and potential for economic advancement",
+        })
+        ;; Housing Stability
+        (map-set impact-metrics "housing-stability" {
+            metric-name: "Residential Security Enhancement",
+            weight: u15,
+            max-score: u100,
+            measurement-unit: "percentage",
+            active: true,
+            description: "Evaluates improvement in housing conditions and residential stability",
+        })
+        ;; Food Security
+        (map-set impact-metrics "food-security" {
+            metric-name: "Nutritional Access and Security",
+            weight: u15,
+            max-score: u100,
+            measurement-unit: "percentage",
+            active: true,
+            description: "Assesses enhancement in food access and nutritional quality",
+        })
+        (ok true)
+    )
+)
+
+(define-public (initialize-assessment-categories)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set assessment-categories "comprehensive" {
+            category-name: "Comprehensive Life Impact Assessment",
+            target-population: "all-beneficiaries",
+            assessment-frequency: u2016,
+            metrics-included: (list "health-improvement" "education-access" "economic-mobility" "housing-stability" "food-security"),
+            active: true,
+        })
+        (map-set assessment-categories "health-focused" {
+            category-name: "Health and Wellness Impact Assessment",
+            target-population: "health-subsidy",
+            assessment-frequency: u1008,
+            metrics-included: (list "health-improvement" "food-security" "" "" ""),
+            active: true,
+        })
+        (map-set assessment-categories "education-focused" {
+            category-name: "Educational Development Impact Assessment",
+            target-population: "education-subsidy",
+            assessment-frequency: u1512,
+            metrics-included: (list "education-access" "economic-mobility" "" "" ""),
+            active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (conduct-impact-assessment
+        (beneficiary principal)
+        (assessment-type (string-ascii 30))
+        (baseline-score uint)
+        (current-score uint)
+        (metrics-data (list 5 (string-ascii 25)))
+        (notes (string-ascii 200))
+    )
+    (let (
+            (assessment-id (+ (var-get impact-assessment-counter) u1))
+            (improvement-score (if (>= current-score baseline-score)
+                (- current-score baseline-score)
+                u0
+            ))
+            (existing-profile (default-to {
+                total-assessments: u0,
+                average-impact-score: u0,
+                highest-impact-score: u0,
+                improvement-trend: 0,
+                last-assessment: u0,
+                impact-categories: (list "" "" "" "" "" "" "" "" "" ""),
+                cumulative-improvement: u0,
+                risk-factors: u0,
+            }
+                (map-get? beneficiary-impact-profile beneficiary)
+            ))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (and (> baseline-score u0) (<= baseline-score u100)) err-invalid-score)
+        (asserts! (and (> current-score u0) (<= current-score u100)) err-invalid-score)
+        (asserts! (is-some (map-get? beneficiaries beneficiary)) err-not-registered)
+        
+        ;; Create assessment record
+        (map-set impact-assessments assessment-id {
+            beneficiary: beneficiary,
+            assessment-type: assessment-type,
+            baseline-score: baseline-score,
+            current-score: current-score,
+            improvement-score: improvement-score,
+            assessment-period: u90,
+            metrics-tracked: metrics-data,
+            assessor: tx-sender,
+            timestamp: stacks-block-height,
+            notes: notes,
+            verified: true,
+        })
+        
+        ;; Update beneficiary profile
+        (let (
+                (new-total-assessments (+ (get total-assessments existing-profile) u1))
+                (new-cumulative-improvement (+ (get cumulative-improvement existing-profile) improvement-score))
+                (new-average-score (/ (+ (* (get average-impact-score existing-profile) (get total-assessments existing-profile)) current-score) new-total-assessments))
+            )
+            (map-set beneficiary-impact-profile beneficiary {
+                total-assessments: new-total-assessments,
+                average-impact-score: new-average-score,
+                highest-impact-score: (if (> current-score (get highest-impact-score existing-profile))
+                    current-score
+                    (get highest-impact-score existing-profile)
+                ),
+                improvement-trend: (if (> improvement-score u0) 1 (if (is-eq improvement-score u0) 0 -1)),
+                last-assessment: stacks-block-height,
+                impact-categories: (get impact-categories existing-profile),
+                cumulative-improvement: new-cumulative-improvement,
+                risk-factors: (get risk-factors existing-profile),
+            })
+        )
+        
+        ;; Update global counters
+        (var-set impact-assessment-counter assessment-id)
+        (var-set total-impact-score (+ (var-get total-impact-score) current-score))
+        (var-set assessments-completed (+ (var-get assessments-completed) u1))
+        
+        ;; Update monthly summary
+        (unwrap-panic (update-monthly-impact-summary current-score improvement-score))
+        
+        (ok assessment-id)
+    )
+)
+
+(define-private (update-monthly-impact-summary
+        (score uint)
+        (improvement uint)
+    )
+    (let (
+            (current-year (/ stacks-block-height u52560))
+            (current-month (/ (mod stacks-block-height u52560) u4380))
+            (summary-key {
+                year: current-year,
+                month: current-month,
+            })
+            (existing-summary (default-to {
+                total-assessments: u0,
+                average-improvement: u0,
+                beneficiaries-assessed: u0,
+                high-impact-count: u0,
+                total-impact-value: u0,
+            }
+                (map-get? monthly-impact-summary summary-key)
+            ))
+        )
+        (map-set monthly-impact-summary summary-key {
+            total-assessments: (+ (get total-assessments existing-summary) u1),
+            average-improvement: (/ (+ (* (get average-improvement existing-summary) (get total-assessments existing-summary)) improvement) (+ (get total-assessments existing-summary) u1)),
+            beneficiaries-assessed: (+ (get beneficiaries-assessed existing-summary) u1),
+            high-impact-count: (+ (get high-impact-count existing-summary) (if (>= score u80) u1 u0)),
+            total-impact-value: (+ (get total-impact-value existing-summary) score),
+        })
+        (ok true)
+    )
+)
+
+(define-public (batch-conduct-assessments
+        (assessments-data (list 5 {
+            beneficiary: principal,
+            assessment-type: (string-ascii 30),
+            baseline-score: uint,
+            current-score: uint,
+            metrics: (list 5 (string-ascii 25)),
+            notes: (string-ascii 200),
+        }))
+    )
+    (let ((results (map process-single-assessment assessments-data)))
+        (ok results)
+    )
+)
+
+(define-private (process-single-assessment
+        (assessment-data {
+            beneficiary: principal,
+            assessment-type: (string-ascii 30),
+            baseline-score: uint,
+            current-score: uint,
+            metrics: (list 5 (string-ascii 25)),
+            notes: (string-ascii 200),
+        })
+    )
+    (conduct-impact-assessment
+        (get beneficiary assessment-data)
+        (get assessment-type assessment-data)
+        (get baseline-score assessment-data)
+        (get current-score assessment-data)
+        (get metrics assessment-data)
+        (get notes assessment-data)
+    )
+)
+
+(define-public (verify-impact-assessment (assessment-id uint))
+    (let ((assessment (unwrap! (map-get? impact-assessments assessment-id) err-impact-assessment-not-found)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set impact-assessments assessment-id
+            (merge assessment { verified: true })
+        )
+        (ok true)
+    )
+)
+
+(define-public (update-impact-metric
+        (metric-name (string-ascii 25))
+        (weight uint)
+        (max-score uint)
+        (description (string-ascii 100))
+    )
+    (let ((metric (unwrap! (map-get? impact-metrics metric-name) err-invalid-metric)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (and (> weight u0) (<= weight u50)) err-invalid-score)
+        (asserts! (and (> max-score u0) (<= max-score u100)) err-invalid-score)
+        (map-set impact-metrics metric-name
+            (merge metric {
+                weight: weight,
+                max-score: max-score,
+                description: description,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-impact-assessment (assessment-id uint))
+    (map-get? impact-assessments assessment-id)
+)
+
+(define-read-only (get-beneficiary-impact-profile (beneficiary principal))
+    (map-get? beneficiary-impact-profile beneficiary)
+)
+
+(define-read-only (get-impact-metric (metric-name (string-ascii 25)))
+    (map-get? impact-metrics metric-name)
+)
+
+(define-read-only (get-assessment-category (category-name (string-ascii 30)))
+    (map-get? assessment-categories category-name)
+)
+
+(define-read-only (get-monthly-impact-summary (year uint) (month uint))
+    (map-get? monthly-impact-summary {
+        year: year,
+        month: month,
+    })
+)
+
+(define-read-only (get-program-impact-overview)
+    (ok {
+        total-assessments: (var-get impact-assessment-counter),
+        total-impact-score: (var-get total-impact-score),
+        assessments-completed: (var-get assessments-completed),
+        average-program-impact: (if (> (var-get assessments-completed) u0)
+            (/ (var-get total-impact-score) (var-get assessments-completed))
+            u0
+        ),
+        current-block: stacks-block-height,
+    })
+)
+
+(define-read-only (calculate-beneficiary-impact-trend (beneficiary principal))
+    (match (map-get? beneficiary-impact-profile beneficiary)
+        profile (ok {
+            beneficiary: beneficiary,
+            total-assessments: (get total-assessments profile),
+            average-impact: (get average-impact-score profile),
+            highest-achievement: (get highest-impact-score profile),
+            trend-direction: (get improvement-trend profile),
+            cumulative-improvement: (get cumulative-improvement profile),
+            impact-rating: (if (>= (get average-impact-score profile) u80)
+                "high-impact"
+                (if (>= (get average-impact-score profile) u60)
+                    "moderate-impact"
+                    "developing-impact"
+                )
+            ),
+        })
+        (err err-impact-assessment-not-found)
+    )
+)
+
+(define-read-only (get-high-impact-beneficiaries-count)
+    (ok u0)
+)
+
+(define-read-only (get-impact-assessment-statistics)
+    (ok {
+        total-assessments-conducted: (var-get impact-assessment-counter),
+        program-effectiveness-score: (if (> (var-get assessments-completed) u0)
+            (/ (var-get total-impact-score) (var-get assessments-completed))
+            u0
+        ),
+        assessments-this-period: (var-get assessments-completed),
+        impact-data-quality: (if (>= (var-get assessments-completed) u10) "sufficient" "limited"),
+    })
+)
+
 (define-public (initialize-economic-indicators)
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
