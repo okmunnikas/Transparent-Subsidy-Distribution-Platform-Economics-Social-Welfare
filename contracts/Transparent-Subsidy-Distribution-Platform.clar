@@ -1307,7 +1307,11 @@
             category-name: "Comprehensive Life Impact Assessment",
             target-population: "all-beneficiaries",
             assessment-frequency: u2016,
-            metrics-included: (list "health-improvement" "education-access" "economic-mobility" "housing-stability" "food-security"),
+            metrics-included: (list
+                "health-improvement"                 "education-access"
+                "economic-mobility"
+                "housing-stability"                 "food-security"
+            ),
             active: true,
         })
         (map-set assessment-categories "health-focused" {
@@ -1356,10 +1360,16 @@
             ))
         )
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        (asserts! (and (> baseline-score u0) (<= baseline-score u100)) err-invalid-score)
-        (asserts! (and (> current-score u0) (<= current-score u100)) err-invalid-score)
-        (asserts! (is-some (map-get? beneficiaries beneficiary)) err-not-registered)
-        
+        (asserts! (and (> baseline-score u0) (<= baseline-score u100))
+            err-invalid-score
+        )
+        (asserts! (and (> current-score u0) (<= current-score u100))
+            err-invalid-score
+        )
+        (asserts! (is-some (map-get? beneficiaries beneficiary))
+            err-not-registered
+        )
+
         ;; Create assessment record
         (map-set impact-assessments assessment-id {
             beneficiary: beneficiary,
@@ -1374,12 +1384,22 @@
             notes: notes,
             verified: true,
         })
-        
+
         ;; Update beneficiary profile
         (let (
                 (new-total-assessments (+ (get total-assessments existing-profile) u1))
-                (new-cumulative-improvement (+ (get cumulative-improvement existing-profile) improvement-score))
-                (new-average-score (/ (+ (* (get average-impact-score existing-profile) (get total-assessments existing-profile)) current-score) new-total-assessments))
+                (new-cumulative-improvement (+ (get cumulative-improvement existing-profile)
+                    improvement-score
+                ))
+                (new-average-score (/
+                    (+
+                        (* (get average-impact-score existing-profile)
+                            (get total-assessments existing-profile)
+                        )
+                        current-score
+                    )
+                    new-total-assessments
+                ))
             )
             (map-set beneficiary-impact-profile beneficiary {
                 total-assessments: new-total-assessments,
@@ -1388,22 +1408,30 @@
                     current-score
                     (get highest-impact-score existing-profile)
                 ),
-                improvement-trend: (if (> improvement-score u0) 1 (if (is-eq improvement-score u0) 0 -1)),
+                improvement-trend: (if (> improvement-score u0)
+                    1
+                    (if (is-eq improvement-score u0)
+                        0
+                        -1
+                    )
+                ),
                 last-assessment: stacks-block-height,
                 impact-categories: (get impact-categories existing-profile),
                 cumulative-improvement: new-cumulative-improvement,
                 risk-factors: (get risk-factors existing-profile),
             })
         )
-        
+
         ;; Update global counters
         (var-set impact-assessment-counter assessment-id)
-        (var-set total-impact-score (+ (var-get total-impact-score) current-score))
+        (var-set total-impact-score
+            (+ (var-get total-impact-score) current-score)
+        )
         (var-set assessments-completed (+ (var-get assessments-completed) u1))
-        
+
         ;; Update monthly summary
         (unwrap-panic (update-monthly-impact-summary current-score improvement-score))
-        
+
         (ok assessment-id)
     )
 )
@@ -1431,52 +1459,63 @@
         )
         (map-set monthly-impact-summary summary-key {
             total-assessments: (+ (get total-assessments existing-summary) u1),
-            average-improvement: (/ (+ (* (get average-improvement existing-summary) (get total-assessments existing-summary)) improvement) (+ (get total-assessments existing-summary) u1)),
+            average-improvement: (/
+                (+
+                    (* (get average-improvement existing-summary)
+                        (get total-assessments existing-summary)
+                    )
+                    improvement
+                )
+                (+ (get total-assessments existing-summary) u1)
+            ),
             beneficiaries-assessed: (+ (get beneficiaries-assessed existing-summary) u1),
-            high-impact-count: (+ (get high-impact-count existing-summary) (if (>= score u80) u1 u0)),
+            high-impact-count: (+ (get high-impact-count existing-summary)
+                (if (>= score u80)
+                    u1
+                    u0
+                )),
             total-impact-value: (+ (get total-impact-value existing-summary) score),
         })
         (ok true)
     )
 )
 
-(define-public (batch-conduct-assessments
-        (assessments-data (list 5 {
-            beneficiary: principal,
-            assessment-type: (string-ascii 30),
-            baseline-score: uint,
-            current-score: uint,
-            metrics: (list 5 (string-ascii 25)),
-            notes: (string-ascii 200),
-        }))
-    )
+(define-public (batch-conduct-assessments (assessments-data (list
+    5
+    {
+        beneficiary: principal,
+        assessment-type: (string-ascii 30),
+        baseline-score: uint,
+        current-score: uint,
+        metrics: (list 5 (string-ascii 25)),
+        notes: (string-ascii 200),
+    }
+)))
     (let ((results (map process-single-assessment assessments-data)))
         (ok results)
     )
 )
 
-(define-private (process-single-assessment
-        (assessment-data {
-            beneficiary: principal,
-            assessment-type: (string-ascii 30),
-            baseline-score: uint,
-            current-score: uint,
-            metrics: (list 5 (string-ascii 25)),
-            notes: (string-ascii 200),
-        })
-    )
-    (conduct-impact-assessment
-        (get beneficiary assessment-data)
+(define-private (process-single-assessment (assessment-data {
+    beneficiary: principal,
+    assessment-type: (string-ascii 30),
+    baseline-score: uint,
+    current-score: uint,
+    metrics: (list 5 (string-ascii 25)),
+    notes: (string-ascii 200),
+}))
+    (conduct-impact-assessment (get beneficiary assessment-data)
         (get assessment-type assessment-data)
         (get baseline-score assessment-data)
-        (get current-score assessment-data)
-        (get metrics assessment-data)
+        (get current-score assessment-data) (get metrics assessment-data)
         (get notes assessment-data)
     )
 )
 
 (define-public (verify-impact-assessment (assessment-id uint))
-    (let ((assessment (unwrap! (map-get? impact-assessments assessment-id) err-impact-assessment-not-found)))
+    (let ((assessment (unwrap! (map-get? impact-assessments assessment-id)
+            err-impact-assessment-not-found
+        )))
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (map-set impact-assessments assessment-id
             (merge assessment { verified: true })
@@ -1522,7 +1561,10 @@
     (map-get? assessment-categories category-name)
 )
 
-(define-read-only (get-monthly-impact-summary (year uint) (month uint))
+(define-read-only (get-monthly-impact-summary
+        (year uint)
+        (month uint)
+    )
     (map-get? monthly-impact-summary {
         year: year,
         month: month,
@@ -1575,7 +1617,10 @@
             u0
         ),
         assessments-this-period: (var-get assessments-completed),
-        impact-data-quality: (if (>= (var-get assessments-completed) u10) "sufficient" "limited"),
+        impact-data-quality: (if (>= (var-get assessments-completed) u10)
+            "sufficient"
+            "limited"
+        ),
     })
 )
 

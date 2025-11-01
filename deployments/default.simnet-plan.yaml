@@ -64,4 +64,9 @@ plan:
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: contracts/Transparent-Subsidy-Distribution-Platform.clar
             clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: pausable
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: contracts/pausable.clar
+            clarity-version: 3
       epoch: "3.1"
